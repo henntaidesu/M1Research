@@ -1,0 +1,12 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+websockets==13.1
+opencv-python==4.10.0.84
+numpy==1.26.4
+# PyTorch (CUDA 12.8) 需单独安装，见下方说明：
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+facenet-pytorch==2.6.0
+hsemotion==0.3.0
+timm==0.9.16
+Pillow>=10.0.0

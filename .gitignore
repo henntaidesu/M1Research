@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Node / 前端构建产物
+node_modules/
+dist/
+vite.config.js.timestamp-*
+
+# 运行时设置（含 DeepSeek API 密钥、登录口令），勿提交
+conf.ini
+.env
+.env.*
+!.env.example
+
+# 打包的 ComfyUI 运行时（66 GB，非项目源码）
+comfyui/core/
+comfyui/cache/
+
+# Unity 生成物（打开工程时自动重建）
+QuestProScene/**/Library/
+QuestProScene/**/Temp/
+QuestProScene/**/Logs/
+QuestProScene/**/UserSettings/
+QuestProScene/**/obj/
+QuestProScene/**/Build/
+QuestProScene/**/*.csproj
+QuestProScene/**/*.sln
+
+# 数据集：只提交脚本与说明，数据本体留在本地
+DataSet/PublicDataSet/*/
+DataSet/MyDataSet/Capture/
+DataSet/MyDataSet/AffectData/
+DataSet/MyDataSet/Stimulus/
+DataSet/MyDataSet/timeline_sliced/
+
+# 训练 / 评测产出
+CoreCode/backend/checkpoints/
+CoreCode/backend/predict_checkpoints/
+CoreCode/backend/Model/
+CoreCode/backend/Eval/
