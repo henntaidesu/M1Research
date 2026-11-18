@@ -15,6 +15,12 @@
 // 不能边下边播）。后端给出 prefetch 列表，空闲时按顺序预下载；sha 变了自动重新下载。
 // 每秒回报一次：当前刺激、播放状态、播放位置、已缓存列表。后端要等到这里回报 playing/shown
 // 才开始给刺激阶段计时，保证受试者实际看到的时长一致。
+//
+// FEA：本脚本自己以 60Hz 读 OVRFaceExpressions 的 70 维，每秒批量 POST /api/stimlib/fea。
+// 不再依赖 QuestProFaceCapture 每帧一个请求（外网下 30 个请求/秒很容易丢）。
+// 时钟：每次轮询记往返时间，服务器在响应里带 server_ms；取最近 20 次中往返最短那次估计
+// 偏移 = server_ms − (发出+收到)/2，随 FEA 一起上传，后端据此把每帧换算到服务器时钟，
+// 与刺激事件对齐（头显系统时钟与服务器不同步，直接比会差几百毫秒到几秒）。
 
 using System.Collections;
 using System.Collections.Generic;
@@ -56,7 +62,23 @@ public class StimulusPlayer : MonoBehaviour
     {
         public int version; public string mode; public string phase; public Stim stimulus; public bool paused;
         public SeekInfo seek; public bool waiting_headset; public string lang; public Stim[] prefetch; public RunInfo run;
+        public long server_ms;
     }
+
+    [Tooltip("FEA 采样率（Hz）")]
+    public float feaRateHz = 60f;
+
+    // ── FEA 采集 + 对时 ──
+    private OVRFaceExpressions _face;
+    private float _feaNextAt;
+    private float _feaLastValidAt = -10f;
+    private readonly List<string> _feaRows = new List<string>();
+    private const int FeaBacklogMax = 600;           // 上传失败时最多积压 10 秒，防止内存无限增长
+    private readonly Queue<long[]> _sync = new Queue<long[]>();   // [rtt, offset]
+    private long _clockOffset;
+    private bool _clockKnown;
+
+    private static long NowMs() => System.DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     private static readonly string[] EmotionKeys = { "angry", "disgust", "fear", "happy", "neutral", "sad", "surprise" };
     private static readonly string[] LabelsZh = { "愤怒", "厌恶", "恐惧", "开心", "平静", "悲伤", "惊讶" };
@@ -128,6 +150,61 @@ public class StimulusPlayer : MonoBehaviour
         StartCoroutine(PollLoop());
         StartCoroutine(ReportLoop());
         StartCoroutine(PrefetchLoop());
+        StartCoroutine(FeaUploadLoop());
+    }
+
+    // ── FEA 采集 ────────────────────────────────────────────────────
+    private void SampleFea()
+    {
+        if (Time.realtimeSinceStartup < _feaNextAt) return;
+        _feaNextAt = Time.realtimeSinceStartup + 1f / Mathf.Max(1f, feaRateHz);
+        if (_face == null)
+        {
+            _face = FindFirstObjectByType<OVRFaceExpressions>();
+            if (_face == null) _face = gameObject.AddComponent<OVRFaceExpressions>();   // 场景里没挂就自己挂一个
+        }
+        if (!_face.ValidExpressions) return;
+        _feaLastValidAt = Time.realtimeSinceStartup;
+        int n = (int)OVRFaceExpressions.FaceExpression.Max;   // 70
+        var sb = new StringBuilder(n * 7 + 20);
+        sb.Append('[').Append(NowMs());
+        for (int i = 0; i < n; i++)
+            sb.Append(',').Append(_face[(OVRFaceExpressions.FaceExpression)i].ToString("0.####", System.Globalization.CultureInfo.InvariantCulture));
+        sb.Append(']');
+        _feaRows.Add(sb.ToString());
+        if (_feaRows.Count > FeaBacklogMax) _feaRows.RemoveRange(0, _feaRows.Count - FeaBacklogMax);
+    }
+
+    private IEnumerator FeaUploadLoop()
+    {
+        var wait = new WaitForSeconds(1f);
+        while (true)
+        {
+            yield return wait;
+            if (_feaRows.Count == 0) continue;
+            var batch = new List<string>(_feaRows);
+            _feaRows.Clear();
+            string json = "{\"offset_ms\":" + (_clockKnown ? _clockOffset : 0)
+                        + ",\"rate_hz\":" + feaRateHz.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        + ",\"rows\":[" + string.Join(",", batch) + "]}";
+            bool ok = false;
+            yield return Post("/api/stimlib/fea", json, (code, _) => ok = code == 200);
+            if (!ok)                                     // 失败就放回队首，下一秒连同新数据一起重发
+            {
+                _feaRows.InsertRange(0, batch);
+                if (_feaRows.Count > FeaBacklogMax) _feaRows.RemoveRange(0, _feaRows.Count - FeaBacklogMax);
+            }
+        }
+    }
+
+    private void UpdateClock(long t0, long t1, long serverMs)
+    {
+        if (serverMs <= 0) return;
+        _sync.Enqueue(new[] { t1 - t0, serverMs - (t0 + t1) / 2 });
+        while (_sync.Count > 20) _sync.Dequeue();
+        long bestRtt = long.MaxValue;
+        foreach (var s in _sync) if (s[0] < bestRtt) { bestRtt = s[0]; _clockOffset = s[1]; }
+        _clockKnown = true;
     }
 
     private bool EnsureRig()
@@ -149,12 +226,18 @@ public class StimulusPlayer : MonoBehaviour
             using (var req = UnityWebRequest.Get(Base + "/api/stimlib/playback?client=vr"))
             {
                 req.timeout = 5;
+                long t0 = NowMs();
                 yield return req.SendWebRequest();
+                long t1 = NowMs();
                 if (req.result == UnityWebRequest.Result.Success)
                 {
                     PbState st = null;
                     try { st = JsonUtility.FromJson<PbState>(req.downloadHandler.text); } catch { st = null; }
-                    if (st != null) Apply(st);
+                    if (st != null)
+                    {
+                        UpdateClock(t0, t1, st.server_ms);
+                        Apply(st);
+                    }
                 }
             }
             yield return wait;
@@ -200,6 +283,13 @@ public class StimulusPlayer : MonoBehaviour
                 SetSky(_gray);
                 HideRating();
                 ShowFixation(true, L("实验结束，谢谢参与！", "実験は終了しました。ご協力ありがとうございました！", "All done. Thank you!"));
+                break;
+            case "rest":                        // 整场开头的静息基线
+                StopMedia();
+                SetSky(_gray);
+                HideRating();
+                ShowFixation(true, L("请放松，自然地注视前方\n+", "リラックスして、正面を自然に見てください\n+",
+                                     "Relax and look straight ahead\n+"));
                 break;
             default:   // fixation / recovery / rating_done
                 StopMedia();
@@ -420,7 +510,10 @@ public class StimulusPlayer : MonoBehaviour
         var sb = new StringBuilder();
         sb.Append("{\"stimulus_id\":\"").Append(Esc(_curId)).Append("\",\"state\":\"").Append(Esc(_hsState))
           .Append("\",\"position_s\":").Append(pos.ToString(System.Globalization.CultureInfo.InvariantCulture))
-          .Append(",\"error\":\"").Append(Esc(_hsError)).Append("\",\"cached_ids\":[");
+          .Append(",\"error\":\"").Append(Esc(_hsError))
+          .Append("\",\"fea_ok\":").Append(Time.realtimeSinceStartup - _feaLastValidAt < 2f ? "true" : "false")
+          .Append(",\"clock_offset_ms\":").Append(_clockKnown ? _clockOffset.ToString() : "null")
+          .Append(",\"cached_ids\":[");
         bool first = true;
         foreach (var id in _cached) { if (!first) sb.Append(','); sb.Append('"').Append(Esc(id)).Append('"'); first = false; }
         sb.Append("]}");
@@ -599,6 +692,7 @@ public class StimulusPlayer : MonoBehaviour
 
     private void Update()
     {
+        SampleFea();
         if (_ratingRoot == null || !_ratingRoot.activeSelf) return;
 
         bool ctrl = (OVRInput.GetConnectedControllers() & (OVRInput.Controller.RTouch | OVRInput.Controller.LTouch)) != 0;

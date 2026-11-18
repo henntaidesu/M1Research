@@ -18,9 +18,9 @@ from collections import defaultdict
 
 import numpy as np
 
+from .. import config
 from ..use_model.fea_emotion import OVR_FACE_EXPRESSIONS
 from . import conditions, library
-from .playback import RUNS_DIR
 
 # 表情通道：去掉眼球朝向（看哪里不是表情，视频会引起更多眼动）和舌头（Quest Pro 不稳定）
 EXPR_IDX = [i for i, n in enumerate(OVR_FACE_EXPRESSIONS)
@@ -44,35 +44,54 @@ def _perm_test(diffs: list, n_mc: int = 20000, seed: int = 0) -> float | None:
     return float((null >= obs - 1e-12).mean())
 
 
+def _segments(events_path) -> list:
+    """events.csv → [(trial, phase, start_ms, end_ms)]。刺激段从头显确认（ack）算起。"""
+    rows = []
+    with open(events_path, encoding="utf-8", newline="") as f:
+        for r in csv.DictReader(f):
+            rows.append(r)
+    marks = [(int(r["ts_ms"]), str(r["trial"]), r["phase"]) for r in rows if r["event"] == "phase"]
+    acks = {str(r["trial"]): int(r["ts_ms"]) for r in rows if r["event"] in ("ack", "ack_timeout")}
+    ends = [int(r["ts_ms"]) for r in rows if r["event"] in ("done", "stopped")]
+    segs = []
+    for i, (ts, trial, phase) in enumerate(marks):
+        end = marks[i + 1][0] if i + 1 < len(marks) else (ends[0] if ends else ts)
+        if phase == "stimulus" and trial in acks:
+            ts = acks[trial]
+        segs.append((trial, phase, ts, end))
+    return segs
+
+
 def _fea_expr_by_trial() -> dict:
-    """(run_id, trial) → 刺激期表情变化量。基线 = 同一试次注视阶段均值。"""
+    """(session_id, trial) → 刺激期表情变化量。基线 = 同一试次注视阶段均值。"""
     out = {}
-    if not RUNS_DIR.exists():
+    if not config.CAPTURE_DIR.exists():
         return out
-    for run_dir in RUNS_DIR.iterdir():
-        p = run_dir / "fea.csv"
-        if not p.exists():
+    for meta_path in config.CAPTURE_DIR.glob("*/*/meta.json"):
+        d = meta_path.parent
+        if not (d / "events.csv").exists() or not (d / "fea.csv").exists():
             continue
-        base, stim = defaultdict(list), defaultdict(list)
-        with open(p, encoding="utf-8", newline="") as f:
+        segs = [s for s in _segments(d / "events.csv") if s[1] in ("fixation", "stimulus")]
+        if not segs:
+            continue
+        starts = np.array([s[2] for s in segs])
+        frames = defaultdict(list)
+        with open(d / "fea.csv", encoding="utf-8", newline="") as f:
             r = csv.reader(f)
-            header = next(r, None)
-            if not header:
-                continue
+            next(r, None)
             for row in r:
-                if len(row) < 5 + 70:
+                if len(row) < 71:
                     continue
-                trial, phase = row[2], row[3]
-                vals = np.asarray(row[5:75], dtype=float)[EXPR_IDX]
-                if phase == "fixation":
-                    base[trial].append(vals)
-                elif phase == "stimulus":
-                    stim[trial].append(vals)
-        for trial, frames in stim.items():
-            if len(frames) < 10 or len(base.get(trial, [])) < 5:
+                ts = int(float(row[0]))
+                k = int(np.searchsorted(starts, ts, side="right")) - 1
+                if k < 0 or ts >= segs[k][3]:
+                    continue
+                frames[(segs[k][0], segs[k][1])].append(np.asarray(row[1:71], dtype=float)[EXPR_IDX])
+        for trial in {s[0] for s in segs}:
+            base, stim = frames.get((trial, "fixation"), []), frames.get((trial, "stimulus"), [])
+            if len(stim) < 10 or len(base) < 5:
                 continue
-            b = np.mean(base[trial], axis=0)
-            out[(run_dir.name, trial)] = float(np.mean(np.abs(np.asarray(frames) - b)))
+            out[(d.name, trial)] = float(np.mean(np.abs(np.asarray(stim) - np.mean(base, axis=0))))
     return out
 
 
@@ -98,6 +117,7 @@ def compare(include_manual: bool = False) -> dict:
             "stimulus_id": r["stimulus_id"], "valence": v, "arousal": a,
             "hit": 1.0 if conditions.hit(cond, v, a) else 0.0, "extremity": abs(v - 5),
             "fea_expr": fea.get((r["run_id"], str(r.get("trial") or ""))),
+            "scene_id": r.get("scene_id") or "",
         })
 
     # ── 各条线汇总 ──
@@ -152,7 +172,21 @@ def compare(include_manual: bool = False) -> dict:
               if m.get("features", {}).get("video") and m.get("features", {}).get("image")]
         ll_diff[k] = {"n_pairs": len(ds), "mean_diff": _mean(ds)}
 
-    return {"lines": lines, "paired": paired, "lowlevel_diff": ll_diff,
+    # 各场景的评分汇总（⑥ 数据页：哪些场景诱发得好、哪些该换）
+    by_scene = {}
+    for p in pres:
+        sid = p.get("scene_id") or ""
+        if sid:
+            by_scene.setdefault(sid, []).append(p)
+    scene_summary = {
+        sid: {"n": len(ps), "valence": _mean([p["valence"] for p in ps]), "arousal": _mean([p["arousal"] for p in ps]),
+              "hit": _mean([p["hit"] for p in ps]), "fea_expr": _mean([p["fea_expr"] for p in ps]),
+              "sd_v": float(np.std([p["valence"] for p in ps], ddof=1)) if len(ps) > 1 else None,
+              "sd_a": float(np.std([p["arousal"] for p in ps], ddof=1)) if len(ps) > 1 else None}
+        for sid, ps in by_scene.items()
+    }
+
+    return {"lines": lines, "paired": paired, "lowlevel_diff": ll_diff, "by_scene": scene_summary,
             "n_ratings": len(pres), "verdict": _verdict(lines, paired)}
 
 

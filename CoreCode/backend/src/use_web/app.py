@@ -27,6 +27,8 @@ from ..use_stimlib import conditions as stimlib_conditions
 from ..use_stimlib import generator as stimlib_generator
 from ..use_stimlib import library as stimlib_library
 from ..use_stimlib import playback as stimlib_playback
+from ..use_stimlib import protocol as stimlib_protocol
+from ..use_stimlib import scenes as stimlib_scenes_mod
 from ..use_store import csv_store
 from ..use_train import train_store, training
 from . import auth
@@ -538,9 +540,82 @@ async def stimlib_sequence_items():
     return {"items": stimlib_playback.run_items()}
 
 
-@app.get("/api/stimlib/runs")
-async def stimlib_runs():
-    return {"runs": stimlib_playback.list_runs()}
+@app.get("/api/stimlib/sessions")
+async def stimlib_sessions():
+    """⑥ 数据：已完成 / 进行中的实验会话（Capture/<受试者>/<会话>/）。"""
+    loop = asyncio.get_event_loop()
+    return {"sessions": await loop.run_in_executor(executor, stimlib_playback.list_sessions)}
+
+
+@app.get("/api/stimlib/sessions/{subject_id}/{session_id}")
+async def stimlib_session_detail(subject_id: str, session_id: str):
+    return _stimlib_call(stimlib_playback.session_detail, subject_id, session_id)
+
+
+@app.post("/api/stimlib/fea")
+async def stimlib_fea(body: dict = Body(default=None)):
+    """头显批量 FEA（StimulusPlayer，60Hz，每秒一批，附时钟偏移）。"""
+    stimulus_control.mark_seen()
+    return stimlib_playback.record_fea_batch(body or {})
+
+
+# ── ① 场景预设 / ④ 实验流程 ──
+@app.get("/api/stimlib/scenes")
+async def stimlib_scenes():
+    loop = asyncio.get_event_loop()
+    items = await loop.run_in_executor(executor, stimlib_scenes_mod.list_scenes)
+    return {"scenes": items, "templates": stimlib_scenes_mod.templates()}
+
+
+@app.post("/api/stimlib/scenes")
+async def stimlib_scene_create(body: dict = Body(default=None)):
+    """新建场景：{name, condition, prompt, motion?} 或 {template: "HVLA/0"}。"""
+    res = _stimlib_call(stimlib_scenes_mod.create, body or {})
+    return res if isinstance(res, JSONResponse) else {"scenes": res}
+
+
+@app.put("/api/stimlib/scenes/{scene_id}")
+async def stimlib_scene_update(scene_id: str, body: dict = Body(default=None)):
+    res = _stimlib_call(stimlib_scenes_mod.update, scene_id, body or {})
+    return res if isinstance(res, JSONResponse) else {"scenes": res}
+
+
+@app.delete("/api/stimlib/scenes/{scene_id}")
+async def stimlib_scene_delete(scene_id: str):
+    return {"scenes": stimlib_scenes_mod.delete(scene_id)}
+
+
+@app.post("/api/stimlib/scenes/reorder")
+async def stimlib_scene_reorder(body: dict = Body(default=None)):
+    res = _stimlib_call(stimlib_scenes_mod.reorder, list((body or {}).get("ids") or []))
+    return res if isinstance(res, JSONResponse) else {"scenes": res}
+
+
+@app.post("/api/stimlib/scenes/{scene_id}/select")
+async def stimlib_scene_select(scene_id: str, body: dict = Body(default=None)):
+    """③ 选图：{pair_id}（空串 = 取消选定）。"""
+    res = _stimlib_call(stimlib_scenes_mod.select_pair, scene_id, str((body or {}).get("pair_id") or ""))
+    return res if isinstance(res, JSONResponse) else {"scenes": res}
+
+
+@app.get("/api/stimlib/protocol")
+async def stimlib_protocol_get():
+    loop = asyncio.get_event_loop()
+
+    def _get():
+        p = stimlib_protocol.get()
+        res = stimlib_protocol.resolve(p)
+        return {"protocol": p, "problems": res["problems"], "n_trials": len(res["items"]),
+                "estimate_s": stimlib_protocol.estimate_s(p, len(res["items"]))}
+    return await loop.run_in_executor(executor, _get)
+
+
+@app.put("/api/stimlib/protocol")
+async def stimlib_protocol_put(body: dict = Body(default=None)):
+    res = _stimlib_call(stimlib_protocol.save, body or {})
+    if isinstance(res, JSONResponse):
+        return res
+    return await stimlib_protocol_get()
 
 
 @app.post("/api/stimlib/rating")
@@ -550,7 +625,7 @@ async def stimlib_rating(body: dict = Body(default=None)):
 
 
 @app.get("/api/stimlib/compare")
-async def stimlib_compare(include_manual: bool = False):
+async def stimlib_compare_get(include_manual: bool = False):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(executor, lambda: stimlib_compare.compare(include_manual))
 

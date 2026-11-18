@@ -1,25 +1,26 @@
-"""后台批量生成：每个候选 = 一张全景（图片线）+ 由它生成的视频（视频线），成对落库。
+"""后台批量生成：按预设场景出候选。每个候选 = 一张全景（图片线），可选再由它生成视频（视频线）。
 
-为什么放后端而不是浏览器：一批几十对、每对几分钟，浏览器标签页一关或电脑睡眠就断了；
+为什么放后端而不是浏览器：一批几十张、每张几分钟，浏览器标签页一关或电脑睡眠就断了；
 后端线程不依赖网页开着。网页只负责发起、看进度、停止。
 
-生成顺序按条件交错（HVHA#1, HVLA#1, …, HVHA#2, …），中途停止时各条件数量也是均衡的。
+生成顺序按场景交错（场景1#1, 场景2#1, …, 场景1#2, …），中途停止时每个场景都已有候选。
+默认只出图（以图片刺激为主）；勾选视频后同一张全景再做 image-to-video，两条线成对。
 """
 import logging
 import random
 import threading
 import time
 
-from . import comfy, conditions, library, postprocess, workflows
+from . import comfy, conditions, library, postprocess, scenes, workflows
 
 logger = logging.getLogger(__name__)
 
 DEFAULTS = {
-    "conditions": list(conditions.CONDITION_KEYS),
-    "per_condition": 4,
+    "scene_ids": [],            # 空 = 全部场景
+    "per_scene": 3,
     "seed": -1,                 # -1 = 随机起点；之后每个候选 +1，全部写进 meta 可复现
     "pano": {"width": 2048, "steps": 20, "cfg": 3.5},
-    "video": {"enabled": True, "gen_width": 1280, "gen_height": 640, "pad": 160,
+    "video": {"enabled": False, "gen_width": 1280, "gen_height": 640, "pad": 160,
               "frames": 121, "fps": 24, "steps": 20, "cfg": 5.0, "shift": 8.0, "loop_k": 12},
     "output": {"width": 2048, "duration_s": 30, "crf": 20},
 }
@@ -59,10 +60,11 @@ def _merge(params: dict) -> dict:
             p[k].update({kk: vv for kk, vv in v.items() if kk in p[k]})
         elif k in p:
             p[k] = v
-    p["conditions"] = [c for c in p["conditions"] if c in conditions.CONDITION_KEYS]
-    if not p["conditions"]:
-        raise ValueError("至少选择一个条件")
-    p["per_condition"] = max(1, min(50, int(p["per_condition"])))
+    known = [s["id"] for s in scenes.list_scenes()]
+    p["scene_ids"] = [s for s in (p["scene_ids"] or known) if s in known]
+    if not p["scene_ids"]:
+        raise ValueError("至少选择一个场景")
+    p["per_scene"] = max(1, min(20, int(p["per_scene"])))
     v, o = p["video"], p["output"]
     # Wan 的宽高步长 32、帧数须为 4k+1；输出宽须为 16 的倍数（H.264 宏块）且高 = 宽/2
     v["gen_width"] = max(256, int(v["gen_width"]) // 32 * 32)
@@ -89,7 +91,7 @@ def start(params: dict) -> dict:
     if missing:
         raise RuntimeError("ComfyUI 缺少模型文件：" + ", ".join(sorted(set(missing))))
 
-    total = len(p["conditions"]) * p["per_condition"]
+    total = len(p["scene_ids"]) * p["per_scene"]
     _stop.clear()
     _set(running=True, total=total, done=0, failed=0, current=None, log=[], error="",
          started_ms=int(time.time() * 1000), finished_ms=0, avg_pair_s=None, eta_s=None, params=p)
@@ -107,27 +109,26 @@ def stop() -> dict:
 
 def _run(p: dict) -> None:
     base_seed = p["seed"] if int(p["seed"]) >= 0 else random.randint(0, 2 ** 31 - 1)
-    plan = []
-    for i in range(p["per_condition"]):
-        for c in p["conditions"]:
-            plan.append((c, i))
+    plan = [sid for _ in range(p["per_scene"]) for sid in p["scene_ids"]]
     durations = []
     try:
-        for n, (cond, i) in enumerate(plan):
+        for n, sid in enumerate(plan):
             if _stop.is_set():
                 break
-            scenes = conditions.SCENES[cond]
-            scene_idx = i % len(scenes)
+            scene = scenes.get(sid)
+            if not scene:
+                _log(f"场景 {sid} 已被删除，跳过")
+                continue
             seed = base_seed + n
-            pair_id = library.new_pair_id(cond, n)
+            pair_id = library.new_pair_id(sid, n)
             t0 = time.time()
-            _set(current={"pair_id": pair_id, "condition": cond, "scene": scenes[scene_idx]["zh"],
-                          "step": "pano", "index": n + 1, "started_ms": int(t0 * 1000)})
+            _set(current={"pair_id": pair_id, "scene_id": sid, "condition": scene["condition"],
+                          "scene": scene["name"], "step": "pano", "index": n + 1, "started_ms": int(t0 * 1000)})
             try:
-                _make_pair(pair_id, cond, scene_idx, seed, p)
+                _make_pair(pair_id, scene, seed, p)
                 with _LOCK:
                     _state["done"] += 1
-                _log(f"完成 {pair_id}（{scenes[scene_idx]['zh']}，{time.time() - t0:.0f}s）")
+                _log(f"完成 {pair_id}（{scene['name']}，{time.time() - t0:.0f}s）")
             except comfy.ComfyError as e:
                 if _stop.is_set():
                     _log(f"{pair_id} 已取消")
@@ -154,17 +155,16 @@ def _step(name: str) -> None:
             _state["current"]["step"] = name
 
 
-def _make_pair(pair_id: str, cond: str, scene_idx: int, seed: int, p: dict) -> None:
+def _make_pair(pair_id: str, scene: dict, seed: int, p: dict) -> None:
     pp, vp, op = p["pano"], p["video"], p["output"]
     out_w, out_h = op["width"], op["width"] // 2
     d = library.pair_dir(pair_id)
     d.mkdir(parents=True, exist_ok=True)
 
-    pano_pos = conditions.pano_prompt(cond, scene_idx)
-    video_pos = conditions.video_prompt(cond, scene_idx)
+    pano_pos, video_pos = scenes.prompts(scene)
     meta = {
-        "pair_id": pair_id, "created_ms": int(time.time() * 1000), "condition": cond,
-        "scene_idx": scene_idx, "scene": conditions.SCENES[cond][scene_idx]["zh"],
+        "pair_id": pair_id, "created_ms": int(time.time() * 1000), "condition": scene["condition"],
+        "scene_id": scene["id"], "scene": scene["name"],
         "prompts": {"pano": pano_pos, "pano_negative": conditions.PANO_NEGATIVE,
                     "video": video_pos, "video_negative": conditions.VIDEO_NEGATIVE},
         "seeds": {"pano": seed, "video": seed},

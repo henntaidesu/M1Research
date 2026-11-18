@@ -12,7 +12,7 @@ conf.ini
 .env
 .env.*
 !.env.example
-
+cache/
 # 打包的 ComfyUI 运行时（66 GB，非项目源码）
 comfyui/core/
 comfyui/cache/

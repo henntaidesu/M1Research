@@ -78,6 +78,7 @@ const suffix = computed(() => route.path.replace(/^\/(cn|jp)/, ''))
 const langSwitchPath = computed(() => (isJp.value ? '/cn' : '/jp') + suffix.value)
 
 const navItems = computed(() => [
+  { to: `${prefix.value}/experiment`, label: currentLocale.value.nav.experiment },
   { to: `${prefix.value}/train`, label: currentLocale.value.nav.train },
   { to: `${prefix.value}/eval`, label: currentLocale.value.nav.evaluate },
 ])
@@ -88,7 +89,6 @@ const comfyGroup = computed(() => ({
   children: [
     { to: `${prefix.value}/comfyui/stimulus`, label: currentLocale.value.nav.comfyStimulus },
     { to: `${prefix.value}/comfyui/affect`, label: currentLocale.value.nav.comfyAffect },
-    { to: `${prefix.value}/comfyui/stimlib`, label: currentLocale.value.nav.comfyStimlib },
   ],
 }))
 

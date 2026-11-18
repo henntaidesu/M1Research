@@ -24,7 +24,7 @@ _LOCK = threading.Lock()
 
 RATINGS_PATH = config.STIMLIB_DIR / "ratings.csv"
 RATING_FIELDS = ["ts_ms", "run_id", "subject_id", "cb_group", "trial", "stimulus_id", "pair_id", "line",
-                 "condition", "valence", "arousal", "label7", "rating_ms"]
+                 "condition", "valence", "arousal", "label7", "rating_ms", "scene_id"]
 
 FILES_URL = "/api/stimulus/files/lib"
 
@@ -74,11 +74,11 @@ def stimuli_of(meta: dict) -> list:
     if files.get("still"):
         out.append({"id": f"{pid}:image", "pair_id": pid, "line": "image", "media": "image",
                     "url": f"{FILES_URL}/{pid}/{files['still']}", "sha": sha.get("still", ""),
-                    "condition": meta.get("condition")})
+                    "condition": meta.get("condition"), "scene_id": meta.get("scene_id", "")})
     if files.get("video"):
         out.append({"id": f"{pid}:video", "pair_id": pid, "line": "video", "media": "video",
                     "url": f"{FILES_URL}/{pid}/{files['video']}", "sha": sha.get("video", ""),
-                    "condition": meta.get("condition")})
+                    "condition": meta.get("condition"), "scene_id": meta.get("scene_id", "")})
     return out
 
 
