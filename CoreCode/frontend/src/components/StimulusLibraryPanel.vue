@@ -211,6 +211,29 @@
                       @click="toggle(pf.scene_ids, s.id)">{{ T.scenePrefix }}{{ s.no }} {{ s.name }}{{ s.selected ? '' : ' ⚠' }}</button>
             </div>
           </div>
+          <div class="field">
+            <div class="row"><span class="field-label">{{ T.catalogTitle }}</span>
+              <button class="icon-btn" @click="loadCatalog">↻</button></div>
+            <p class="hint">{{ T.catalogHint }}</p>
+            <p v-if="!catalog.length" class="muted small">{{ T.catalogEmpty }}</p>
+            <table v-else class="tbl">
+              <thead><tr><th></th><th>ID</th><th>{{ T.catKind }}</th><th>{{ T.emotion }}</th><th>{{ T.condition }}</th>
+                <th>{{ T.catEthics }}</th><th>QC</th><th>{{ T.catEnabled }}</th><th></th></tr></thead>
+              <tbody>
+                <tr v-for="c in catalog" :key="c.id">
+                  <td><input type="checkbox" :checked="pf.extra_ids.includes(c.id)" @change="toggle(pf.extra_ids, c.id)" /></td>
+                  <td class="mono" :title="c.name">{{ c.id }}</td>
+                  <td>{{ T.kinds[c.kind] || c.kind }}</td><td>{{ c.target_emotion }}</td><td>{{ c.condition }}</td>
+                  <td :class="c.ethics_tier >= 2 ? 'bad' : ''">{{ c.ethics_tier }}</td>
+                  <td><select :value="c.qc" class="ctrl-select" @change="patchCat(c, { qc: $event.target.value })">
+                    <option value="pending">pending</option><option value="ok">ok</option><option value="reject">reject</option>
+                  </select></td>
+                  <td><input type="checkbox" :checked="c.enabled" @change="patchCat(c, { enabled: $event.target.checked })" /></td>
+                  <td class="bad small">{{ (c.problems || []).join('；') }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
           <div class="grid4">
             <label class="field"><span class="field-label">{{ T.order }}</span>
               <select v-model="pf.order" class="ctrl-select">
@@ -235,10 +258,32 @@
             <label class="field"><span class="field-label">{{ T.recovery }}</span>
               <input v-model.number="pf.recovery_s" type="number" min="0" class="ctrl-num" /></label>
           </div>
+          <div class="sec-title small-title">{{ T.effTitle }}</div>
+          <p class="hint">{{ T.effHint }}</p>
+          <div class="grid4">
+            <label class="field"><span class="field-label">{{ T.posedReps }}</span>
+              <input v-model.number="pf.posed_reps" type="number" min="0" max="5" class="ctrl-num" /></label>
+            <label class="field"><span class="field-label">{{ T.posedHold }}</span>
+              <input v-model.number="pf.posed_hold_s" type="number" min="1" class="ctrl-num" /></label>
+            <label class="field"><span class="field-label">{{ T.breakEvery }}</span>
+              <input v-model.number="pf.break_every" type="number" min="0" class="ctrl-num" /></label>
+            <label class="field"><span class="field-label">{{ T.breakS }}</span>
+              <input v-model.number="pf.break_s" type="number" min="0" class="ctrl-num" /></label>
+            <label class="field"><span class="field-label">{{ T.longRecovery }}</span>
+              <input v-model.number="pf.long_recovery_arousal" type="number" min="0" max="9" class="ctrl-num" /></label>
+            <label class="field"><span class="field-label">{{ T.minCov }}</span>
+              <input v-model.number="pf.min_fea_coverage" type="number" min="0" max="1" step="0.05" class="ctrl-num" /></label>
+          </div>
+          <div class="row">
+            <label><input v-model="pf.require_label7" type="checkbox" /> {{ T.requireLabel7 }}</label>
+            <label><input v-model="pf.ask_intensity" type="checkbox" /> {{ T.askIntensity }}</label>
+            <label><input v-model="pf.requeue_bad" type="checkbox" /> {{ T.requeueBad }}</label>
+          </div>
           <div class="flow-line">
             <span class="step">{{ T.phases.rest }} {{ pf.rest_s }}s</span> →
+            <template v-if="pf.posed_reps"><span class="step">{{ T.phases.posed }} {{ pf.posed_reps }}×7</span> →</template>
             <span class="step loop">[ {{ T.phases.fixation }} {{ pf.fixation_s }}s → {{ T.phases.stimulus }} {{ pf.stimulus_s }}s →
-              {{ T.phases.rating }} → {{ T.phases.recovery }} {{ pf.recovery_s }}s ] × {{ pf.scene_ids.length }}</span> →
+              {{ T.phases.rating }} → {{ T.phases.recovery }} {{ pf.recovery_s }}s ] × {{ pf.scene_ids.length + pf.extra_ids.length }}</span> →
             <span class="step">{{ T.phases.done }}</span>
           </div>
           <div class="row">
@@ -280,6 +325,7 @@
             <label class="field"><span class="field-label">{{ T.seed }}</span>
               <input v-model.number="runSeed" type="number" min="-1" class="ctrl-num" /></label>
           </div>
+          <label class="row"><input v-model="consentTier2" type="checkbox" /> {{ T.consentTier2 }}</label>
           <div class="row">
             <button class="btn-primary big" :disabled="busy || pb.mode === 'sequence' || !subjectId || !!proto.problems?.length"
                     @click="startRun">{{ T.startRun }}</button>
@@ -304,15 +350,20 @@
           </div>
           <p v-if="pb.waiting_headset" class="muted">{{ T.waitingHeadset }}</p>
           <p v-if="pb.phase === 'rating'" class="muted">{{ T.waitingRating }}</p>
+          <p v-if="pb.cue" class="muted">{{ T.phases.posed }}：{{ pb.cue.emotion }}（{{ pb.cue.i }}/{{ pb.cue.n }}）</p>
+          <p v-if="pb.phase === 'break'" class="muted">{{ T.breakHint }}</p>
           <p v-if="hs.error" class="bad small">headset: {{ hs.error }}</p>
           <table v-if="seqList.length" class="tbl">
             <thead><tr><th>{{ T.trial }}</th><th>{{ T.scene }}</th><th>{{ T.condition }}</th><th>{{ T.status }}</th>
-              <th>{{ T.valence }}</th><th>{{ T.arousal }}</th><th>{{ T.emotion }}</th></tr></thead>
+              <th>{{ T.valence }}</th><th>{{ T.arousal }}</th><th>{{ T.emotion }}</th><th>FEA</th></tr></thead>
             <tbody>
               <tr v-for="it in seqList" :key="it.trial" :class="{ cur: it.trial === pb.run.index && pb.mode === 'sequence' }">
                 <td>{{ it.trial }}</td><td>{{ it.scene_no ? `${T.scenePrefix}${it.scene_no} ` : '' }}{{ it.scene_name || it.stimulus_id }}</td>
                 <td>{{ it.condition }}</td><td>{{ T.itemStatus[it.status] || it.status }}</td>
-                <td>{{ it.rating?.valence ?? '' }}</td><td>{{ it.rating?.arousal ?? '' }}</td><td>{{ it.rating?.label7 ?? '' }}</td>
+                <td>{{ it.rating?.valence ?? '' }}</td><td>{{ it.rating?.arousal ?? '' }}</td>
+                <td>{{ it.rating?.label7 ?? '' }}{{ it.rating?.intensity ? ` ·${it.rating.intensity}` : '' }}</td>
+                <td :class="it.quality === 'bad' ? 'bad' : ''">{{ it.fea_cov != null ? Math.round(it.fea_cov * 100) + '%' : '' }}
+                  {{ it.attempt > 1 ? T.retry : '' }}{{ it.quality === 'bad' ? ' ✗' : '' }}</td>
               </tr>
             </tbody>
           </table>
@@ -342,10 +393,12 @@
               <tr v-for="s in sessions" :key="s.session_id + s.subject_id">
                 <td>{{ s.subject_id }}</td><td class="mono">{{ s.session_id }}</td>
                 <td :class="s.status === 'done' ? 'good' : s.status === 'running' ? '' : 'bad'">{{ T.sessStatus[s.status] || s.status }}</td>
-                <td>{{ s.n_rated }}/{{ s.n_trials }}</td>
+                <td>{{ s.n_rated }}/{{ s.n_trials }}<span v-if="s.n_bad" class="bad small"> ✗{{ s.n_bad }}</span></td>
                 <td>{{ s.fea_rows }}</td>
                 <td>{{ fmtTime(s.created_ms) }}</td>
-                <td><button class="mini" @click="openSession(s)">{{ T.detail }}</button></td>
+                <td><button class="mini" @click="openSession(s)">{{ T.detail }}</button>
+                  <button v-if="s.status !== 'done' && s.kind === 'protocol'" class="mini"
+                          :disabled="busy || pb.mode === 'sequence'" @click="resumeRun(s)">{{ T.resumeRun }}</button></td>
               </tr>
             </tbody>
           </table>
@@ -563,7 +616,20 @@ const videoSrc = ref(null)
 
 // ── ④ 实验流程 ──
 const pf = reactive({ scene_ids: [], order: 'random', line: 'image', rest_s: 60, fixation_s: 5, stimulus_s: 30,
-  rating_timeout_s: 0, recovery_s: 10 })
+  rating_timeout_s: 0, recovery_s: 10, posed_reps: 2, posed_hold_s: 4, posed_relax_s: 3, break_every: 0, break_s: 120,
+  long_recovery_arousal: 7, recovery_long_s: 30, require_label7: true, ask_intensity: true, min_fea_coverage: 0.8,
+  requeue_bad: true, max_attempts: 2, extra_ids: [], templates: {} })
+const catalog = ref([])
+async function loadCatalog() {
+  try { catalog.value = (await api.listCatalog()).items || [] } catch { /* 忽略 */ }
+}
+async function patchCat(c, body) {
+  try {
+    await api.patchCatalog(c.id, body)
+    await loadCatalog()
+    await loadProto()
+  } catch (e) { protoErr.value = e.message }
+}
 const proto = reactive({ problems: [], n_trials: 0, estimate_s: 0 })
 const protoErr = ref('')
 const protoSaved = ref(false)
@@ -593,6 +659,7 @@ const busy = ref(false)
 const runErr = ref('')
 const subjectId = ref('')
 const runSeed = ref(-1)
+const consentTier2 = ref(false)
 const seqList = ref([])
 const phasePct = computed(() => (pb.phase_duration_s ? Math.min(100, Math.round((pb.phase_elapsed_s / pb.phase_duration_s) * 100)) : 0))
 const curScene = computed(() => {
@@ -617,8 +684,17 @@ async function run(fn) {
 }
 const cmd = (c, extra = {}) => run(() => api.playbackCmd(c, extra))
 async function startRun() {
-  await run(() => api.seqStart({ kind: 'protocol', subject_id: subjectId.value.trim(), seed: runSeed.value }))
+  await run(() => api.seqStart({ kind: 'protocol', subject_id: subjectId.value.trim(), seed: runSeed.value,
+    consent_tier2: consentTier2.value }))
   seqList.value = (await api.seqItems()).items
+}
+async function resumeRun(s) {
+  if (!window.confirm(T.value.resumeConfirm.replace('{s}', `${s.subject_id}/${s.session_id}`))) return
+  subjectId.value = s.subject_id
+  await run(() => api.seqStart({ kind: 'protocol', subject_id: s.subject_id, seed: s.seed ?? -1,
+    resume_session: s.session_id, consent_tier2: consentTier2.value }))
+  seqList.value = (await api.seqItems()).items
+  tab.value = 'run'
 }
 async function stopRun() {
   if (pb.mode === 'sequence' && !window.confirm(T.value.stopConfirm)) return
@@ -655,6 +731,7 @@ onMounted(async () => {
   await refreshAll()
   gp.scene_ids = scenes.value.map((s) => s.id)
   await loadProto()
+  loadCatalog()
   loadGen()
   pollPlayback()
   if (tab.value === 'data' || tab.value === 'cmp') loadData()

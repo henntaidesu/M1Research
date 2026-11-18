@@ -38,6 +38,10 @@ export const genStop = () => call('/api/stimlib/generate/stop', { method: 'POST'
 export const getProtocol = () => call('/api/stimlib/protocol')
 export const saveProtocol = (p) => call('/api/stimlib/protocol', { method: 'PUT', body: p })
 
+// 统一刺激清单（事件场景 / 模仿片段 / 带常模视频）
+export const listCatalog = () => call('/api/stimlib/catalog')
+export const patchCatalog = (id, body) => call(`/api/stimlib/catalog/${enc(id)}`, { method: 'PATCH', body })
+
 // ⑤ 运行
 export const playbackState = () => call('/api/stimlib/playback')
 export const headsetStatus = () => call('/api/stimlib/playback/headset')

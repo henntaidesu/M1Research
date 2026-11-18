@@ -22,6 +22,7 @@ from ..use_model.device import select_device
 from ..use_model.fea_emotion import classify_fea, normalize_blendshapes
 from ..use_eval import eval_store, evaluation
 from ..use_llm import deepseek
+from ..use_stimlib import catalog as stimlib_catalog
 from ..use_stimlib import compare as stimlib_compare
 from ..use_stimlib import conditions as stimlib_conditions
 from ..use_stimlib import generator as stimlib_generator
@@ -606,7 +607,7 @@ async def stimlib_protocol_get():
         p = stimlib_protocol.get()
         res = stimlib_protocol.resolve(p)
         return {"protocol": p, "problems": res["problems"], "n_trials": len(res["items"]),
-                "estimate_s": stimlib_protocol.estimate_s(p, len(res["items"]))}
+                "estimate_s": stimlib_protocol.estimate_s(p, len(res["items"]), res["items"])}
     return await loop.run_in_executor(executor, _get)
 
 
@@ -620,8 +621,37 @@ async def stimlib_protocol_put(body: dict = Body(default=None)):
 
 @app.post("/api/stimlib/rating")
 async def stimlib_rating(body: dict = Body(default=None)):
-    """头显自评：{stimulus_id, valence 1-9, arousal 1-9, label7?, rating_ms?}。"""
+    """头显自评：{stimulus_id, valence 1-9, arousal 1-9, label7?, intensity?, rating_ms?, mode?(full/quick)}。"""
     return _stimlib_call(stimlib_playback.submit_rating, body or {})
+
+
+@app.post("/api/stimlib/events")
+async def stimlib_events_post(body: dict = Body(default=None)):
+    """头显打点（场景 / 模仿片段的事件时刻）：{offset_ms, events: [{headset_ms, key, stimulus_id, detail}]}。"""
+    return stimlib_playback.record_events(body or {})
+
+
+# ── 统一刺激清单（catalog/<id>.json；素材经 /api/stimulus/files/catalog/assets/ 静态服务）──
+@app.get("/api/stimlib/catalog")
+async def stimlib_catalog_list(kind: str = "", qc: str = "", include_library: bool = False):
+    loop = asyncio.get_event_loop()
+
+    def _list():
+        items = stimlib_catalog.list_items(kind or None, qc or None, include_library)
+        return [{**{k: v for k, v in it.items() if k != "_lib"},
+                 "problems": stimlib_catalog.problems_of(it, it["id"])} for it in items]
+    return {"items": await loop.run_in_executor(executor, _list)}
+
+
+@app.patch("/api/stimlib/catalog/{item_id}")
+async def stimlib_catalog_patch(item_id: str, body: dict = Body(default=None)):
+    """网页质检：{qc?: pending/ok/reject, enabled?: bool, note?}。"""
+    res = _stimlib_call(stimlib_catalog.patch, item_id, body or {})
+    if isinstance(res, JSONResponse):
+        return res
+    if res is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "刺激不存在"})
+    return {"ok": True, "item": {k: v for k, v in res.items() if k != "_lib"}}
 
 
 @app.get("/api/stimlib/compare")

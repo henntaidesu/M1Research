@@ -124,8 +124,13 @@ def _load_npz(path):
     return d
 
 
-def _fit(tr, va, params, dmeta, device_str=None):
-    """训一个 GRU，返回 (best_state, best_metrics, val_pred)。纯训练，不落盘。"""
+def _fit(tr, va, params, dmeta, device_str=None, select="best"):
+    """训一个 GRU，返回 (best_state, best_metrics, val_pred)。纯训练，不落盘。
+
+    select="best"：按验证集 macro-F1 挑最佳 epoch（仅限 va 是独立验证集时）。
+    select="last"：固定训满 epochs、取最后一个 epoch——LOSO 里 va 就是测试被试，
+    在它上面挑 epoch 等于在测试集上调参，分数会虚高。
+    """
     import numpy as np
     import torch
     from torch import nn
@@ -172,7 +177,7 @@ def _fit(tr, va, params, dmeta, device_str=None):
         pred = np.concatenate(preds) if preds else np.zeros(0, dtype="int64")
         acc, f1 = _score(va["y"], pred)
         logger.info("[predict-train] epoch %d/%d val_acc=%.3f macro_f1=%.3f", ep, epochs, acc, f1)
-        if f1 > best_f1:
+        if select == "last" or f1 > best_f1:
             best_f1, best_pred = f1, pred
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
@@ -258,7 +263,7 @@ def train_predict_loso(dataset_dir: str, params: dict = None) -> dict:
         tr, va = sub(alld, ~m), sub(alld, m)
         if len(tr["y"]) == 0 or len(va["y"]) == 0:
             continue
-        _state, model_m, _pred = _fit(tr, va, params, dmeta)
+        _state, model_m, _pred = _fit(tr, va, params, dmeta, select="last")
         base = _baselines(tr["y"], va["y"], va.get("y_now"), va.get("block"))
         folds.append({"held_out": str(held), "n_val": int(len(va["y"])),
                       "model": model_m, "baselines": base})

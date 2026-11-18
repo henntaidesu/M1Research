@@ -9,6 +9,11 @@
     X = 过去 window_s 秒序列 (seq_len, 70)
     y = 未来 horizon_s 秒时刻的 7 类索引（即「预测接下来会产生什么表情」）
 
+**自评按试次绑定**：会话里有 stimulus.csv（含 trial 列）时，只有刺激呈现期 [onset, offset] 内的帧带标签，
+标签取**同一 trial** 的自评；其余阶段（静息、注视、自评、恢复）标签为 -1、不出样本；quality=bad 的试次整段丢弃。
+（旧做法按自评提交时间前向填充：自评在刺激结束后才提交，第 k 个试次的刺激段会拿到第 k−1 个试次的标签。）
+旧格式会话（没有 trial 列）才退回前向填充。
+
 **标签源默认 selfreport（自评）**。规则式 `fea` 标签由 classify_fea 从同一份 70 维 FEA 算出，
 与 X 同源——用它训练等于让模型去拟合一个确定性函数 f(X)，「预测准不准」无法被证伪。
 故 `--label-source fea` 仅供调试，需显式加 `--allow-circular-labels` 才放行。
@@ -167,6 +172,34 @@ def selfreport_labels(grid_ts, reports):
     return labels
 
 
+def load_trial_windows(sess_dir):
+    """stimulus.csv + selfreport.csv（都有 trial 列）→ [(onset, offset, label_idx, trial)]；没有 trial 列返回 None。"""
+    sp, rp = os.path.join(sess_dir, "stimulus.csv"), os.path.join(sess_dir, "selfreport.csv")
+    if not (os.path.exists(sp) and os.path.exists(rp)):
+        return None
+    with open(sp, encoding="utf-8", newline="") as f:
+        stim = list(csv.DictReader(f))
+    with open(rp, encoding="utf-8", newline="") as f:
+        reps = list(csv.DictReader(f))
+    if not stim or "trial" not in stim[0] or not reps or "trial" not in reps[0]:
+        return None
+    lab = {r["trial"]: CLASS_NAMES.index(r["label7"]) for r in reps if r.get("label7") in CLASS_NAMES}
+    out = []
+    for r in stim:
+        if r.get("quality") == "bad" or r["trial"] not in lab:
+            continue
+        out.append((int(float(r["onset_ms"])), int(float(r["offset_ms"])), lab[r["trial"]], r["trial"]))
+    return out
+
+
+def trial_labels(grid_ts, windows):
+    """刺激呈现期内的帧取该试次的自评标签，其余 -1。"""
+    labels = np.full(len(grid_ts), -1, dtype="int64")
+    for on, off, lab, _t in windows:
+        labels[(grid_ts >= on) & (grid_ts <= off)] = lab
+    return labels
+
+
 def load_blocks(path):
     """stimulus.csv → 按 onset 升序 [(onset_ms, image_id), ...]，用于 block-level 评测分组。"""
     out = []
@@ -214,6 +247,9 @@ def slice_session(sess_dir, window_s, horizon_s, rate_hz, stride, label_source, 
 
     reports = load_selfreport(os.path.join(sess_dir, "selfreport.csv"))
     blocks = load_blocks(os.path.join(sess_dir, "stimulus.csv"))
+    windows = load_trial_windows(sess_dir) if label_source == "selfreport" else None
+    if windows is not None:                  # 新格式：块 = 试次（同一张图重看两次是两个块）
+        blocks = [(on, f"t{t}") for on, _off, _lab, t in sorted(windows)]
     sess_name = os.path.basename(sess_dir.rstrip("/\\"))
 
     seq_len = int(round(window_s * rate_hz))
@@ -222,14 +258,21 @@ def slice_session(sess_dir, window_s, horizon_s, rate_hz, stride, label_source, 
 
     # 逐段处理：滑窗只在段内取，绝不跨采集空洞
     for grid_ts, grid in resample_segments(ts, feats, rate_hz, max_gap_s):
-        lab = selfreport_labels(grid_ts, reports) if label_source == "selfreport" else fea_labels(grid)
+        if label_source != "selfreport":
+            lab = fea_labels(grid)
+        elif windows is not None:
+            lab = trial_labels(grid_ts, windows)
+        else:
+            lab = selfreport_labels(grid_ts, reports)
         last_start = len(grid) - seq_len - horizon
         for s in range(0, last_start + 1, stride):
             i_now = s + seq_len - 1
             target = lab[i_now + horizon]
             cur = lab[i_now]
-            if target < 0 or cur < 0:      # selfreport 尚无标签
+            if target < 0 or cur < 0 or lab[s] < 0:   # 无标签，或窗口跨出了刺激呈现期
                 continue
+            if windows is not None and not (lab[s] == cur == target):
+                continue                       # 只取完全落在同一试次刺激期内的窗
             X.append(grid[s:s + seq_len])
             y.append(int(target))
             y_now.append(int(cur))
