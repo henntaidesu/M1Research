@@ -22,6 +22,11 @@ from ..use_model.device import select_device
 from ..use_model.fea_emotion import classify_fea, normalize_blendshapes
 from ..use_eval import eval_store, evaluation
 from ..use_llm import deepseek
+from ..use_stimlib import compare as stimlib_compare
+from ..use_stimlib import conditions as stimlib_conditions
+from ..use_stimlib import generator as stimlib_generator
+from ..use_stimlib import library as stimlib_library
+from ..use_stimlib import playback as stimlib_playback
 from ..use_store import csv_store
 from ..use_train import train_store, training
 from . import auth
@@ -413,6 +418,143 @@ async def stimulus_show(body: dict = Body(default=None)):
     return {"ok": True, "version": _current_stimulus["version"], "url": _current_stimulus["url"]}
 
 
+# ── 刺激库：图片线 / 视频线成对生成 + 头显播放控制 + 方案对比（use_stimlib）────────
+def _stimlib_call(fn, *args, **kw):
+    """ValueError → 400（参数不对），RuntimeError → 409（状态不允许，如已有任务在跑）。"""
+    try:
+        return fn(*args, **kw)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+    except RuntimeError as e:
+        return JSONResponse(status_code=409, content={"ok": False, "error": str(e)})
+
+
+@app.get("/api/stimlib/options")
+async def stimlib_options():
+    """条件表 + 固定场景表 + 生成默认参数 + 序列默认参数。"""
+    return {**stimlib_conditions.options(), "gen_defaults": stimlib_generator.DEFAULTS,
+            "seq_defaults": stimlib_playback.SEQ_DEFAULTS}
+
+
+@app.get("/api/stimlib/items")
+async def stimlib_items(condition: str = "", qc: str = ""):
+    loop = asyncio.get_event_loop()
+    items = await loop.run_in_executor(executor, lambda: stimlib_library.list_pairs(condition, qc))
+    return {"items": items}
+
+
+@app.patch("/api/stimlib/items/{pair_id}")
+async def stimlib_item_qc(pair_id: str, body: dict = Body(default=None)):
+    """质检：qc = ok / reject / pending。生成有明显瑕疵（畸形、接缝、闪烁）的对标 reject，不进播放列表。"""
+    body = body or {}
+    res = _stimlib_call(stimlib_library.set_qc, pair_id, str(body.get("qc") or ""), str(body.get("note") or ""))
+    if res is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "不存在"})
+    return res
+
+
+@app.delete("/api/stimlib/items/{pair_id}")
+async def stimlib_item_delete(pair_id: str):
+    ok = _stimlib_call(stimlib_library.delete_pair, pair_id)
+    return ok if isinstance(ok, JSONResponse) else {"ok": bool(ok)}
+
+
+@app.get("/api/stimlib/generate/status")
+async def stimlib_generate_status():
+    return stimlib_generator.status()
+
+
+@app.post("/api/stimlib/generate")
+async def stimlib_generate(body: dict = Body(default=None)):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, lambda: _stimlib_call(stimlib_generator.start, body or {}))
+
+
+@app.post("/api/stimlib/generate/stop")
+async def stimlib_generate_stop():
+    return stimlib_generator.stop()
+
+
+@app.get("/api/stimlib/playback")
+async def stimlib_playback_get(client: str | None = None):
+    """头显带 client=vr 每 0.3s 轮询一次，兼作在线心跳。"""
+    if client == "vr":
+        stimulus_control.mark_seen()
+    return stimlib_playback.state()
+
+
+@app.post("/api/stimlib/playback/status")
+async def stimlib_playback_status(body: dict = Body(default=None)):
+    """头显回报自己的播放状态与已缓存的刺激。"""
+    stimulus_control.mark_seen()
+    return stimlib_playback.report(body or {})
+
+
+@app.get("/api/stimlib/playback/headset")
+async def stimlib_playback_headset():
+    return {**stimlib_playback.headset_status(), "presence": stimulus_control.presence()}
+
+
+@app.post("/api/stimlib/playback/cmd")
+async def stimlib_playback_cmd(body: dict = Body(default=None)):
+    """手动播放指令：show / blank / pause / resume / seek / rate / stop。"""
+    body = body or {}
+    cmd = str(body.get("cmd") or "")
+    pb = stimlib_playback
+    actions = {
+        "show": lambda: pb.cmd_show(str(body.get("stimulus_id") or ""), str(body.get("subject_id") or "")),
+        "blank": pb.cmd_blank,
+        "pause": lambda: pb.cmd_pause(True),
+        "resume": lambda: pb.cmd_pause(False),
+        "seek": lambda: pb.cmd_seek(float(body.get("pos_s") or 0)),
+        "rate": pb.cmd_rate,
+        "stop": pb.cmd_stop,
+    }
+    if cmd not in actions:
+        return JSONResponse(status_code=400, content={"ok": False, "error": f"未知指令 {cmd}"})
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, lambda: _stimlib_call(actions[cmd]))
+
+
+@app.post("/api/stimlib/playback/prefetch")
+async def stimlib_playback_prefetch(body: dict = Body(default=None)):
+    """让头显提前下载：{"ids": [...]} 或 {"ids": "all"}。外网下视频几十 MB，实验前先缓存好。"""
+    ids = (body or {}).get("ids") or []
+    return _stimlib_call(stimlib_playback.set_prefetch, ids if ids == "all" else list(ids))
+
+
+@app.post("/api/stimlib/sequence/start")
+async def stimlib_sequence_start(body: dict = Body(default=None)):
+    return _stimlib_call(stimlib_playback.start_sequence, body or {})
+
+
+@app.post("/api/stimlib/sequence/skip")
+async def stimlib_sequence_skip():
+    return _stimlib_call(stimlib_playback.seq_skip)
+
+
+@app.get("/api/stimlib/sequence/items")
+async def stimlib_sequence_items():
+    return {"items": stimlib_playback.run_items()}
+
+
+@app.get("/api/stimlib/runs")
+async def stimlib_runs():
+    return {"runs": stimlib_playback.list_runs()}
+
+
+@app.post("/api/stimlib/rating")
+async def stimlib_rating(body: dict = Body(default=None)):
+    """头显自评：{stimulus_id, valence 1-9, arousal 1-9, label7?, rating_ms?}。"""
+    return _stimlib_call(stimlib_playback.submit_rating, body or {})
+
+
+@app.get("/api/stimlib/compare")
+async def stimlib_compare(include_manual: bool = False):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, lambda: stimlib_compare.compare(include_manual))
+
+
 # ── 头显在线状态（外网可用的唯一途径：应用自己的心跳）──────────────────
 # 头显和笔记本都会被带到外网，服务器主动连不进它们的 NAT，只能靠头显应用自己的心跳。
 @app.get("/api/headset/presence")
@@ -517,6 +659,7 @@ async def fea_ingest(body: dict = Body(default=None)):
     result["success"] = True
     result["timestamp_ms"] = ts
     _latest_fea["data"] = result
+    stimlib_playback.record_fea(ts, bs)      # 刺激库播放序列运行中才落盘
 
     sid = _affect_active["session_id"]
     if sid:

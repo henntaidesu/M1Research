@@ -11,6 +11,7 @@
   src/use_eval/                    图像 FER 评测
   src/use_predict/                 FEA 时序情绪预测训练（自采数据集，CLI：train_timeline.py）
   src/use_llm/                     DeepSeek 刺激提示词生成
+  src/use_stimlib/                 刺激库：图片/视频成对生成、头显播放控制、两条线对比
 """
 import uvicorn
 

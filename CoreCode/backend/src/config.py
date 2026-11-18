@@ -88,6 +88,15 @@ EVAL_DIR.mkdir(parents=True, exist_ok=True)
 IMAGE_DIR = Path(os.getenv("IMAGE_DIR", str(MY_DATASET_DIR / "Stimulus")))
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
+# ── 刺激库：图片线 / 视频线成对生成 + 头显播放 + 方案对比（use_stimlib）──────
+# 放在 IMAGE_DIR 下，复用 /api/stimulus/files 静态服务（头显下载路径已在登录放行清单里）。
+# lib/<pair_id>/{pano.png, still.jpg, video.mp4, thumb.jpg, meta.json}
+# lib/ratings.csv：每次呈现后的自评；lib/runs/<run_id>/：一次播放序列的事件与 FEA
+STIMLIB_DIR = IMAGE_DIR / "lib"
+STIMLIB_DIR.mkdir(parents=True, exist_ok=True)
+# 后端直连 ComfyUI（批量生成在后端跑，不依赖浏览器开着）
+COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
+
 # 每个训练运行保留的最近权重文件数
 KEEP_CHECKPOINTS = int(os.getenv("KEEP_CHECKPOINTS", "10"))
 

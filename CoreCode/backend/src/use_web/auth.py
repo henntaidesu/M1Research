@@ -44,6 +44,9 @@ _PUBLIC_EXACT = frozenset({
     ("GET", "/api/headset/rtc/watch"),
     ("POST", "/api/headset/rtc/offer"),
     ("GET", "/api/headset/rtc/answer"),
+    ("GET", "/api/stimlib/playback"),        # StimulusPlayer：轮询播放状态（兼作心跳）
+    ("POST", "/api/stimlib/playback/status"),  # 同上：回报播放进度与缓存
+    ("POST", "/api/stimlib/rating"),         # 同上：头显里的 SAM 自评
 })
 
 # 前缀放行：刺激图静态文件（头显要下载图本身）、登录接口自身。
